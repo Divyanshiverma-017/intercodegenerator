@@ -1,5 +1,15 @@
 temp_count = 0
 
+
+class Node:
+    """Simple binary tree node: operator or identifier in value; optional left/right children."""
+
+    def __init__(self, value, left=None, right=None):
+        self.value = value
+        self.left = left
+        self.right = right
+
+
 def new_temp():
     global temp_count
     temp_count += 1
