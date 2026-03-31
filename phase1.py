@@ -1,9 +1,10 @@
 """
-Simple intermediate code generator with 4 main phases:
+Simple intermediate code generator with 5 main phases:
 1. Lexical analysis
 2. Syntax analysis + AST construction
-3. Intermediate code generation
-4. Code optimization (on intermediate code)
+3. Semantic analysis
+4. Intermediate code generation
+5. Code optimization (on intermediate code)
 
 The tiny language we support here:
 

@@ -10,6 +10,7 @@ from phase1 import (
     format_ast,
     format_instructions,
 )
+from phase3 import perform_semantic_analysis
 
 # Layout / theme
 BG_APP = "#1a1d23"
@@ -104,15 +105,16 @@ class CompilerFrontend(tk.Tk):
         phases_frame = tk.Frame(self, bg=BG_APP)
         phases_frame.pack(fill="both", expand=True, padx=24, pady=(8, 12))
         phases_frame.grid_rowconfigure(0, weight=1)
-        for c in range(4):
+        for c in range(5):
             phases_frame.grid_columnconfigure(c, weight=1, uniform="phase")
 
         self.phase_boxes: list[tuple[tk.Frame, tk.Label, tk.Text]] = []
         phase_titles = [
-            "Phase 1 - Lexical Analysis",
-            "Phase 2 - Syntax & AST",
-            "Phase 3 - Code Generation",
-            "Phase 4 - Code Optimization",
+            "PHASE 1\nLexical Analysis",
+            "PHASE 2\nSyntax & AST",
+            "PHASE 3\nSemantic Analysis",
+            "PHASE 4\nIntermediate Code Generated",
+            "PHASE 5\nCode Optimization",
         ]
 
         for idx, title_text in enumerate(phase_titles):
@@ -208,6 +210,13 @@ class CompilerFrontend(tk.Tk):
             ast = parser.parse()
             ast_text = format_ast(ast)
 
+            # Semantic Analysis Phase
+            semantic_errors = perform_semantic_analysis(ast)
+            if semantic_errors:
+                semantic_text = "Semantic Errors Found:\n" + "\n".join(f"• {error}" for error in semantic_errors)
+            else:
+                semantic_text = "Semantic Analysis: No errors found\n\nAll variables properly declared and used."
+
             codegen = CodeGenerator()
             raw_instructions, _ = codegen.generate(ast)
             code_text = format_instructions(raw_instructions)
@@ -218,8 +227,9 @@ class CompilerFrontend(tk.Tk):
             steps = [
                 (0, f"=== SOURCE TEXT ===\n{source}\n\n{tokens_text}"),
                 (1, f"AST:\n{ast_text}"),
-                (2, f"Three-address code:\n{code_text}"),
-                (3, f"Optimized three-address code:\n{optimized_text}"),
+                (2, f"{semantic_text}"),
+                (3, f"Three-address code:\n{code_text}"),
+                (4, f"Optimized three-address code:\n{optimized_text}"),
             ]
 
             delay_ms = 600
