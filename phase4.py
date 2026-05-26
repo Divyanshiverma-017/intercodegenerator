@@ -1,18 +1,25 @@
-from phase2 import tac
+# Construct AST manually
+# Expression: b + (c * d)
 
-quadruples = []
+tree = Node('+',
+            Node('b'),
+            Node('*', Node('c'), Node('d'))
+           )
 
+# Generate TAC
+result = generate_TAC(tree)
 
-def generate_quadruples():
-    for line in tac:
-        parts = line.split()
-        if len(parts) == 3 and parts[1] == "=":
-            # e.g. a = t1
-            result, _, src = parts
-            quadruples.append(("MOV", src, "", result))
-            continue
-        result = parts[0]
-        arg1 = parts[2]
-        op = parts[3]
-        arg2 = parts[4]
-        quadruples.append((op, arg1, arg2, result))
+# Assignment
+tac.append(f"a = {result}")
+
+# Generate Quadruples
+generate_quadruples()
+
+# Output
+print("Three Address Code (TAC):")
+for line in tac:
+    print(line)
+
+print("\nQuadruples:")
+for quad in quadruples:
+    print(quad)
