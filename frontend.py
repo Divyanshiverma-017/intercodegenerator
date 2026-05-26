@@ -105,9 +105,9 @@ class CompilerFrontend(tk.Tk):
         self.input_entry.pack(fill="x", padx=28, pady=(0, 10))
         self.input_entry.insert(
             "1.0",
-            "int x = 5;\nint y = 2;\nint z = x + y * 3;\nprint(z);\n"
-            "if (z > 10) {\n  print(z);\n} else {\n  z = z + 1;\n  print(z);\n}\n"
-            "while (y < 5) {\n  y = y + 1;\n  print(y);\n}\n",
+            "int x = 5;\nint y = 2;\nint z = x + y * 3;\nprintf(z);\n"
+            "if (z > 10) {\n  printf(z);\n} else {\n  z = z + 1;\n  printf(z);\n}\n"
+            "while (y < 5) {\n  y = y + 1;\n  printf(y);\n}\n",
         )
 
         phases_frame = tk.Frame(self, bg=BG_APP)
