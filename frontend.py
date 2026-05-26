@@ -5,12 +5,14 @@ from phase1 import (
     lex,
     Parser,
     CodeGenerator,
+    SemanticAnalyzer,
     optimize_instructions,
     format_tokens,
     format_ast,
-    format_instructions,
+    format_semantic,
+    format_codegen,
+    format_optimized,
 )
-from phase3 import perform_semantic_analysis
 
 # Layout / theme
 BG_APP = "#1a1d23"
@@ -29,13 +31,12 @@ HIGHLIGHT_PANEL = "#1a3048"
 class CompilerFrontend(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Intermediate Code Generator - Visual Pipeline")
-        self.geometry("1320x780")
-        self.minsize(1080, 640)
+        self.title("Intermediate Code Generator - Full Program Pipeline")
+        self.geometry("1580x800")
+        self.minsize(1280, 680)
         self.configure(bg=BG_APP)
 
-        # Per-phase default border (subtle variety)
-        self._phase_border_idle = ["#4a5568", "#5c6570", "#4a5568", "#5c6570"]
+        self._phase_border_idle = ["#4a5568", "#5c6570", "#6b7280", "#5c6570", "#4a5568"]
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -53,7 +54,7 @@ class CompilerFrontend(tk.Tk):
 
         subtitle = tk.Label(
             header,
-            text="Watch each phase as your expression moves through the compiler pipeline",
+            text="Paste code -> see 5 simple phases: tokens, AST, semantic, code, optimized",
             font=("Segoe UI", 12),
             fg=FG_MUTED,
             bg=BG_APP,
@@ -61,29 +62,16 @@ class CompilerFrontend(tk.Tk):
         subtitle.pack(anchor="w", pady=(6, 0))
 
         input_frame = tk.Frame(self, bg=BG_APP)
-        input_frame.pack(fill="x", padx=28, pady=(12, 8))
+        input_frame.pack(fill="x", padx=28, pady=(12, 4))
 
         input_label = tk.Label(
             input_frame,
-            text="Source input:",
+            text="Source code:",
             font=("Segoe UI", 11),
             fg="#ffffff",
             bg=BG_APP,
         )
         input_label.pack(side="left")
-
-        self.input_entry = tk.Entry(
-            input_frame,
-            font=("Consolas", 12),
-            bg=BG_TEXT,
-            fg=FG_TEXT,
-            insertbackground=ACCENT,
-            relief="flat",
-            highlightthickness=1,
-            highlightbackground=ACCENT_DIM,
-            highlightcolor=ACCENT,
-        )
-        self.input_entry.pack(side="left", fill="x", expand=True, padx=(12, 12), ipady=8)
 
         run_button = tk.Button(
             input_frame,
@@ -99,22 +87,42 @@ class CompilerFrontend(tk.Tk):
             cursor="hand2",
             command=self.run_pipeline,
         )
-        run_button.pack(side="left")
+        run_button.pack(side="right")
 
-        # Main phases: each column expands
+        self.input_entry = tk.Text(
+            self,
+            font=("Consolas", 12),
+            bg=BG_TEXT,
+            fg=FG_TEXT,
+            insertbackground=ACCENT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=ACCENT_DIM,
+            highlightcolor=ACCENT,
+            height=8,
+            wrap="none",
+        )
+        self.input_entry.pack(fill="x", padx=28, pady=(0, 10))
+        self.input_entry.insert(
+            "1.0",
+            "int x = 5;\nint y = 2;\nint z = x + y * 3;\nprint(z);\n"
+            "if (z > 10) {\n  print(z);\n} else {\n  z = z + 1;\n  print(z);\n}\n"
+            "while (y < 5) {\n  y = y + 1;\n  print(y);\n}\n",
+        )
+
         phases_frame = tk.Frame(self, bg=BG_APP)
-        phases_frame.pack(fill="both", expand=True, padx=24, pady=(8, 12))
+        phases_frame.pack(fill="both", expand=True, padx=16, pady=(8, 12))
         phases_frame.grid_rowconfigure(0, weight=1)
         for c in range(5):
             phases_frame.grid_columnconfigure(c, weight=1, uniform="phase")
 
         self.phase_boxes: list[tuple[tk.Frame, tk.Label, tk.Text]] = []
         phase_titles = [
-            "PHASE 1\nLexical Analysis",
-            "PHASE 2\nSyntax & AST",
-            "PHASE 3\nSemantic Analysis",
-            "PHASE 4\nIntermediate Code Generated",
-            "PHASE 5\nCode Optimization",
+            "Phase 1 - Tokens",
+            "Phase 2 - AST",
+            "Phase 3 - Semantic",
+            "Phase 4 - TAC",
+            "Phase 5 - Optimized",
         ]
 
         for idx, title_text in enumerate(phase_titles):
@@ -126,34 +134,34 @@ class CompilerFrontend(tk.Tk):
                 highlightthickness=2,
                 bd=0,
             )
-            frame.grid(row=0, column=idx, padx=10, pady=6, sticky="nsew")
+            frame.grid(row=0, column=idx, padx=6, pady=6, sticky="nsew")
 
             title_label = tk.Label(
                 frame,
                 text=title_text,
-                font=("Segoe UI", 12, "bold"),
+                font=("Segoe UI", 11, "bold"),
                 fg="#ffffff",
                 bg=BG_TITLE,
                 anchor="center",
-                pady=12,
-                padx=10,
+                pady=10,
+                padx=6,
             )
             title_label.pack(fill="x")
 
             content = tk.Text(
                 frame,
-                font=("Consolas", 11),
+                font=("Consolas", 10),
                 bg=BG_TEXT,
                 fg=FG_TEXT,
                 wrap="word",
-                height=28,
+                height=26,
                 borderwidth=0,
                 highlightthickness=0,
-                padx=14,
-                pady=14,
+                padx=10,
+                pady=10,
                 state="disabled",
             )
-            content.pack(fill="both", expand=True, padx=10, pady=(0, 12))
+            content.pack(fill="both", expand=True, padx=8, pady=(0, 10))
 
             self.phase_boxes.append((frame, title_label, content))
 
@@ -194,9 +202,9 @@ class CompilerFrontend(tk.Tk):
         content.configure(state="disabled")
 
     def run_pipeline(self) -> None:
-        source = self.input_entry.get().strip()
+        source = self.input_entry.get("1.0", "end-1c").strip()
         if not source:
-            messagebox.showwarning("No input", "Please enter an expression or statements first.")
+            messagebox.showwarning("No input", "Please enter source code first.")
             return
 
         try:
@@ -210,29 +218,28 @@ class CompilerFrontend(tk.Tk):
             ast = parser.parse()
             ast_text = format_ast(ast)
 
-            # Semantic Analysis Phase
-            semantic_errors = perform_semantic_analysis(ast)
-            if semantic_errors:
-                semantic_text = "Semantic Errors Found:\n" + "\n".join(f"• {error}" for error in semantic_errors)
+            semantic = SemanticAnalyzer().analyze(ast)
+            sem_text = format_semantic(semantic)
+
+            if semantic.ok:
+                codegen = CodeGenerator()
+                raw_instructions, _ = codegen.generate(ast)
+                optimized_instructions = optimize_instructions(raw_instructions)
+                code_text = format_codegen(raw_instructions)
+                opt_text = format_optimized(raw_instructions, optimized_instructions)
             else:
-                semantic_text = "Semantic Analysis: No errors found\n\nAll variables properly declared and used."
-
-            codegen = CodeGenerator()
-            raw_instructions, _ = codegen.generate(ast)
-            code_text = format_instructions(raw_instructions)
-
-            optimized_instructions = optimize_instructions(raw_instructions)
-            optimized_text = format_instructions(optimized_instructions)
+                code_text = "PHASE 4: CODE GENERATION\n\nSkipped (fix Phase 3 errors first)."
+                opt_text = "PHASE 5: OPTIMIZATION\n\nSkipped."
 
             steps = [
-                (0, f"=== SOURCE TEXT ===\n{source}\n\n{tokens_text}"),
-                (1, f"AST:\n{ast_text}"),
-                (2, f"{semantic_text}"),
-                (3, f"Three-address code:\n{code_text}"),
-                (4, f"Optimized three-address code:\n{optimized_text}"),
+                (0, f"YOUR CODE:\n{source}\n\n{tokens_text}"),
+                (1, ast_text),
+                (2, sem_text),
+                (3, code_text),
+                (4, opt_text),
             ]
 
-            delay_ms = 600
+            delay_ms = 500
 
             def make_step_callback(idx: int, text: str):
                 def _cb() -> None:
@@ -246,10 +253,8 @@ class CompilerFrontend(tk.Tk):
             for i, (idx, text) in enumerate(steps):
                 self.after(i * delay_ms, make_step_callback(idx, text))
 
-            self.after(
-                len(steps) * delay_ms + 50,
-                lambda: self.status_label.configure(text="Pipeline complete."),
-            )
+            final = "Pipeline complete." if semantic.ok else "Stopped after semantic errors."
+            self.after(len(steps) * delay_ms + 50, lambda: self.status_label.configure(text=final))
 
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("Error", f"An error occurred:\n{e}")
