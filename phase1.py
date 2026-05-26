@@ -4,7 +4,7 @@ Intermediate code generator with a small full-program language.
 Supported program elements:
 - declaration: int x;  or  int x = expr;
 - assignment: x = expr;
-- print: print(expr);
+- printf: printf(expr);
 - if/else: if (cond) { ... } else { ... }
 - while: while (cond) { ... }
 - blocks: { statement* }
@@ -38,8 +38,16 @@ KEYWORDS = {
     "if": "IF",
     "else": "ELSE",
     "while": "WHILE",
-    "print": "PRINT",
+    "printf": "PRINT",
     "int": "INT",
+}
+
+# Python keywords that should not be allowed in C code
+PYTHON_KEYWORDS = {
+    "def", "class", "import", "from", "as", "return", "yield", "raise",
+    "except", "finally", "with", "lambda", "pass", "break", "continue",
+    "global", "nonlocal", "assert", "async", "await", "del", "in", "is",
+    "not", "and", "or", "True", "False", "None"
 }
 
 # Order matters: long patterns before short patterns.
@@ -116,7 +124,7 @@ _TOKEN_SYMBOL: dict[str, str] = {
     "IF": "if",
     "ELSE": "else",
     "WHILE": "while",
-    "PRINT": "print",
+    "PRINT": "printf",
 }
 
 
@@ -223,6 +231,10 @@ def lex(source: str) -> List[Token]:
 
         if kind == "IDENT" and value in KEYWORDS:
             kind = KEYWORDS[value]
+        
+        # Reject Python keywords to ensure only C syntax is accepted
+        if kind == "IDENT" and value in PYTHON_KEYWORDS:
+            lex_error(source, pos, f"'{value}' is a Python keyword and is not allowed in C code")
 
         tokens.append(Token(kind, value, pos, line, column))
 
@@ -477,7 +489,7 @@ class Instruction:
         if self.op == "JZ":
             return f"ifz {self.arg1} goto {self.target}"
         if self.op == "PRINT":
-            return f"print {self.arg1}"
+            return f"printf {self.arg1}"
         return f"{self.target}: {self.op} {self.arg1 or ''} {self.arg2 or ''}".strip()
 
 
@@ -829,7 +841,7 @@ def _stmt_plain(n: ASTNode, index: int) -> str:
     if isinstance(n, Assign):
         return f"{index}. {n.name} = {_expr_summary(n.expr)};"
     if isinstance(n, PrintStmt):
-        return f"{index}. print({_expr_summary(n.expr)});"
+        return f"{index}. printf({_expr_summary(n.expr)});"
     if isinstance(n, IfStmt):
         text = f"{index}. if ({_expr_summary(n.condition)}) {{ ... }}"
         if n.else_branch is not None:
@@ -868,7 +880,7 @@ def _instr_plain(instr: Instruction) -> str:
     if instr.op == "JZ":
         return f"if {instr.arg1} is false, go to {instr.target}"
     if instr.op == "PRINT":
-        return f"print {instr.arg1}"
+        return f"printf {instr.arg1}"
     return str(instr)
 
 
