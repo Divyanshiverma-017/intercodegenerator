@@ -1,12 +1,17 @@
 """
 Intermediate code generator with a small full-program language.
 
+Accepts either a statement snippet or a complete C program (#include, int main, return).
+
 Supported program elements:
-- declaration: int x;  or  int x = expr;
+- declaration: int x;  int a, b = 1, c;  or  int x = expr;
 - assignment: x = expr;
-- printf: printf(expr);
+- printf: printf(expr); or printf("fmt", args...);
+- scanf: scanf("fmt", &var, ...);
 - if/else: if (cond) { ... } else { ... }
 - while: while (cond) { ... }
+- for: for (init; cond; incr) { ... }
+- do-while: do { ... } while (cond);
 - blocks: { statement* }
 
 Expressions:
@@ -17,6 +22,202 @@ Expressions:
 import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
+
+# ========== SOURCE PREPARATION (FULL C PROGRAMS) ==========
+
+
+@dataclass
+class PrepareResult:
+    """Source normalized for the compiler pipeline."""
+
+    source: str
+    original: str
+    had_preprocessor: bool
+    extracted_main: bool
+    notes: List[str]
+
+
+_INCLUDE_RE = re.compile(
+    r"#\s*include\s+(?:<[^>\n]+>|\"[^\"\n]+\")",
+    re.MULTILINE,
+)
+_BARE_INCLUDE_RE = re.compile(
+    r"^\s*include\s+<[^>\n]+>\s*$",
+    re.MULTILINE,
+)
+_OTHER_PP_LINE_RE = re.compile(r"^\s*#.*$", re.MULTILINE)
+
+
+def _strip_preprocessor_directives(source: str) -> Tuple[str, bool]:
+    """Remove #include / #define and other preprocessor directives from source."""
+    found = False
+
+    def _sub(pattern: re.Pattern[str], text: str) -> str:
+        nonlocal found
+        new, count = pattern.subn("", text)
+        if count:
+            found = True
+        return new
+
+    source = _sub(_INCLUDE_RE, source)
+    source = _sub(_BARE_INCLUDE_RE, source)
+    source = _sub(_OTHER_PP_LINE_RE, source)
+    return source, found
+
+
+def _strip_return_statements(source: str) -> str:
+    """Remove return statements (not needed for intermediate-code generation)."""
+    return re.sub(r"\breturn\b[^;]*;", "", source)
+
+
+def _find_matching_brace(source: str, open_index: int) -> int:
+    """Return index of closing brace matching source[open_index] == '{'."""
+    if open_index >= len(source) or source[open_index] != "{":
+        raise ValueError("expected '{'")
+    depth = 0
+    i = open_index
+    in_line_comment = False
+    in_block_comment = False
+    in_string = False
+    in_char = False
+    while i < len(source):
+        ch = source[i]
+        nxt = source[i + 1] if i + 1 < len(source) else ""
+
+        if in_line_comment:
+            if ch == "\n":
+                in_line_comment = False
+            i += 1
+            continue
+        if in_block_comment:
+            if ch == "*" and nxt == "/":
+                in_block_comment = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if in_string:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if in_char:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == "'":
+                in_char = False
+            i += 1
+            continue
+
+        if ch == "/" and nxt == "/":
+            in_line_comment = True
+            i += 2
+            continue
+        if ch == "/" and nxt == "*":
+            in_block_comment = True
+            i += 2
+            continue
+        if ch == '"':
+            in_string = True
+            i += 1
+            continue
+        if ch == "'":
+            in_char = True
+            i += 1
+            continue
+
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    raise SyntaxError("Unmatched '{' in source (missing '}')")
+
+
+def _extract_main_body(source: str) -> Optional[str]:
+    """If int main(...) { ... } is present, return the inner statement list."""
+    match = re.search(r"\bmain\s*\(", source)
+    if not match:
+        return None
+
+    i = match.end()
+    paren_depth = 1
+    while i < len(source) and paren_depth > 0:
+        ch = source[i]
+        if ch == "(":
+            paren_depth += 1
+        elif ch == ")":
+            paren_depth -= 1
+        i += 1
+    if paren_depth != 0:
+        raise SyntaxError("Unmatched '(' in main parameter list")
+
+    while i < len(source) and source[i] in " \t\r\n":
+        i += 1
+    if i >= len(source) or source[i] != "{":
+        return None
+
+    close = _find_matching_brace(source, i)
+    return source[i + 1 : close].strip()
+
+
+def prepare_source(source: str) -> PrepareResult:
+    """
+    Normalize complete C programs for this compiler:
+    - strip preprocessor directives (#include, etc.)
+    - extract statements from main() when present
+    - remove return statements
+    """
+    original = source
+    notes: List[str] = []
+    working = source
+
+    working, had_pp = _strip_preprocessor_directives(working)
+    if had_pp:
+        notes.append("Removed preprocessor directives (#include, #define, ...).")
+
+    extracted_main = False
+    main_body = _extract_main_body(working)
+    if main_body is not None:
+        working = main_body
+        extracted_main = True
+        notes.append("Extracted statements from main() for compilation.")
+
+    working = _strip_return_statements(working)
+    if extracted_main:
+        notes.append("Removed return statement(s) from main.")
+
+    working = working.strip()
+    if not working:
+        raise SyntaxError(
+            "No compilable statements found. Add a main() body or paste statements directly."
+        )
+
+    return PrepareResult(
+        source=working,
+        original=original,
+        had_preprocessor=had_pp,
+        extracted_main=extracted_main,
+        notes=notes,
+    )
+
+
+def format_prepare_notes(result: PrepareResult) -> str:
+    if not result.notes:
+        return ""
+    lines = ["PREPROCESSING (full C program support):", *result.notes, ""]
+    if result.extracted_main or result.had_preprocessor:
+        lines.append("Code analyzed by the compiler:")
+        lines.append(result.source)
+        lines.append("")
+    return "\n".join(lines)
+
 
 # ========== LEXICAL ANALYZER PHASE ==========
 
@@ -38,8 +239,13 @@ KEYWORDS = {
     "if": "IF",
     "else": "ELSE",
     "while": "WHILE",
+    "for": "FOR",
+    "do": "DO",
     "printf": "PRINT",
+    "scanf": "SCAN",
     "int": "INT",
+    "return": "RETURN",
+    "void": "VOID",
 }
 
 # Python keywords that should not be allowed in C code
@@ -52,6 +258,7 @@ PYTHON_KEYWORDS = {
 
 # Order matters: long patterns before short patterns.
 TOKEN_SPEC = [
+    ("STRING", r'"(?:[^"\\]|\\.)*"'),
     ("NUMBER", r"\d+(\.\d+)?"),
     ("IDENT", r"[A-Za-z_][A-Za-z0-9_]*"),
     ("EQ", r"=="),
@@ -60,6 +267,8 @@ TOKEN_SPEC = [
     ("GE", r">="),
     ("LT", r"<"),
     ("GT", r">"),
+    ("INC", r"\+\+"),
+    ("DEC", r"--"),
     ("PLUS", r"\+"),
     ("MINUS", r"-"),
     ("STAR", r"\*"),
@@ -67,11 +276,13 @@ TOKEN_SPEC = [
     ("COMMENT_LINE", r"//[^\n]*"),
     ("SLASH", r"/"),
     ("ASSIGN", r"="),
+    ("AMP", r"&"),
     ("LPAREN", r"\("),
     ("RPAREN", r"\)"),
     ("LBRACE", r"\{"),
     ("RBRACE", r"\}"),
     ("SEMI", r";"),
+    ("COMMA", r","),
     ("SKIP", r"[ \t\r\n]+"),
     ("MISMATCH", r"."),
 ]
@@ -98,10 +309,15 @@ def lex_error(source: str, pos: int, msg: str) -> None:
 
 # Lexical categories shown in Phase 1
 _OPERATOR_TYPES = frozenset(
-    {"PLUS", "MINUS", "STAR", "SLASH", "ASSIGN", "EQ", "NE", "LT", "LE", "GT", "GE"}
+    {
+        "PLUS", "MINUS", "STAR", "SLASH", "ASSIGN", "EQ", "NE",
+        "LT", "LE", "GT", "GE", "INC", "DEC", "AMP",
+    }
 )
-_SEPARATOR_TYPES = frozenset({"LPAREN", "RPAREN", "LBRACE", "RBRACE", "SEMI"})
-_KEYWORD_TYPES = frozenset({"INT", "IF", "ELSE", "WHILE", "PRINT"})
+_SEPARATOR_TYPES = frozenset({"LPAREN", "RPAREN", "LBRACE", "RBRACE", "SEMI", "COMMA"})
+_KEYWORD_TYPES = frozenset(
+    {"INT", "IF", "ELSE", "WHILE", "FOR", "DO", "PRINT", "SCAN", "RETURN", "VOID"}
+)
 
 _TOKEN_SYMBOL: dict[str, str] = {
     "PLUS": "+",
@@ -115,16 +331,23 @@ _TOKEN_SYMBOL: dict[str, str] = {
     "LE": "<=",
     "GT": ">",
     "GE": ">=",
+    "INC": "++",
+    "DEC": "--",
     "LPAREN": "(",
     "RPAREN": ")",
     "LBRACE": "{",
     "RBRACE": "}",
     "SEMI": ";",
+    "COMMA": ",",
     "INT": "int",
     "IF": "if",
     "ELSE": "else",
     "WHILE": "while",
+    "FOR": "for",
+    "DO": "do",
     "PRINT": "printf",
+    "SCAN": "scanf",
+    "AMP": "&",
 }
 
 
@@ -132,6 +355,8 @@ def token_category(token_type: str) -> str:
     """Main lexical class: Identifier, Operator, Separator, Number, or Keyword."""
     if token_type == "IDENT":
         return "Identifier"
+    if token_type == "STRING":
+        return "String"
     if token_type == "NUMBER":
         return "Number"
     if token_type in _KEYWORD_TYPES:
@@ -143,10 +368,41 @@ def token_category(token_type: str) -> str:
     return "Other"
 
 
+def decode_c_string(literal: str) -> str:
+    """Decode a C string literal (including quotes) into a Python string."""
+    if len(literal) < 2 or literal[0] != '"' or literal[-1] != '"':
+        raise ValueError(f"invalid string literal: {literal!r}")
+    inner = literal[1:-1]
+    out: List[str] = []
+    i = 0
+    while i < len(inner):
+        if inner[i] == "\\" and i + 1 < len(inner):
+            esc = inner[i + 1]
+            if esc == "n":
+                out.append("\n")
+            elif esc == "t":
+                out.append("\t")
+            elif esc == "r":
+                out.append("\r")
+            elif esc == "\\":
+                out.append("\\")
+            elif esc == '"':
+                out.append('"')
+            else:
+                out.append(esc)
+            i += 2
+        else:
+            out.append(inner[i])
+            i += 1
+    return "".join(out)
+
+
 def token_symbol(token: Token) -> str:
     """What the token represents (symbol or name)."""
     if token.type == "IDENT":
         return f"name: {token.value}"
+    if token.type == "STRING":
+        return f"string: {decode_c_string(token.value)!r}"
     if token.type == "NUMBER":
         return f"value: {token.value}"
     if token.type in _KEYWORD_TYPES:
@@ -158,7 +414,7 @@ def format_tokens_table(tokens: List[Token]) -> str:
     lines = [
         "PHASE 1: LEXICAL ANALYZER",
         "Each word is classified as:",
-        "  Identifier | Operator | Separator | Number | Keyword",
+        "  Identifier | Operator | Separator | Number | Keyword | String",
         "",
         f"{'#':>3}   {'Word':<10}  {'Category':<12}  Detail",
         "-" * 48,
@@ -170,6 +426,7 @@ def format_tokens_table(tokens: List[Token]) -> str:
         "Separator": 0,
         "Number": 0,
         "Keyword": 0,
+        "String": 0,
     }
     id_names: List[str] = []
     op_symbols: List[str] = []
@@ -201,6 +458,7 @@ def format_tokens_table(tokens: List[Token]) -> str:
     lines.append(f"  Separators  : {counts['Separator']}")
     lines.append(f"  Numbers     : {counts['Number']}")
     lines.append(f"  Keywords    : {counts['Keyword']}")
+    lines.append(f"  Strings     : {counts.get('String', 0)}")
     if id_names:
         lines.append(f"  Identifier names: {', '.join(id_names)}")
     if op_symbols:
@@ -214,7 +472,20 @@ def show_tokens(tokens: List[Token]) -> None:
     print(format_tokens_table(tokens))
 
 
+_last_prepare: Optional[PrepareResult] = None
+
+
+def get_last_prepare() -> Optional[PrepareResult]:
+    """Result from the most recent prepare_source run inside lex()."""
+    return _last_prepare
+
+
 def lex(source: str) -> List[Token]:
+    global _last_prepare
+    prep = prepare_source(source)
+    _last_prepare = prep
+    source = prep.source
+
     tokens: List[Token] = []
     for match in MASTER_REGEX.finditer(source):
         kind = match.lastgroup
@@ -263,6 +534,11 @@ class Variable(ASTNode):
 
 
 @dataclass
+class StringLiteral(ASTNode):
+    value: str
+
+
+@dataclass
 class BinaryOp(ASTNode):
     op: str
     left: ASTNode
@@ -283,14 +559,41 @@ class Assign(ASTNode):
 
 
 @dataclass
+class IncDec(ASTNode):
+    """Prefix/postfix ++/-- on an int variable."""
+
+    name: str
+    op: str  # "INC" or "DEC"
+    prefix: bool = False
+
+
+@dataclass
 class VarDecl(ASTNode):
     name: str
     init: Optional[ASTNode] = None
 
 
 @dataclass
+class VarDeclGroup(ASTNode):
+    """int a, b = 1, c; — multiple declarations on one line."""
+
+    declarations: List[VarDecl]
+
+
+@dataclass
 class PrintStmt(ASTNode):
     expr: ASTNode
+    extra_args: List[ASTNode] = None
+
+    def __post_init__(self) -> None:
+        if self.extra_args is None:
+            self.extra_args = []
+
+
+@dataclass
+class ScanStmt(ASTNode):
+    format_expr: ASTNode
+    variables: List[str]
 
 
 @dataclass
@@ -304,6 +607,20 @@ class IfStmt(ASTNode):
 class WhileStmt(ASTNode):
     condition: ASTNode
     body: ASTNode
+
+
+@dataclass
+class ForStmt(ASTNode):
+    body: ASTNode
+    init: Optional[ASTNode] = None
+    condition: Optional[ASTNode] = None
+    increment: Optional[ASTNode] = None
+
+
+@dataclass
+class DoWhileStmt(ASTNode):
+    body: ASTNode
+    condition: ASTNode
 
 
 @dataclass
@@ -348,10 +665,14 @@ class Parser:
     def parse(self) -> Program:
         statements: List[ASTNode] = []
         while self.current.type != "EOF":
-            statements.append(self.statement())
+            stmt = self.statement()
+            if stmt is not None:
+                statements.append(stmt)
         return Program(statements)
 
-    def statement(self) -> ASTNode:
+    def statement(self) -> Optional[ASTNode]:
+        if self.current.type == "RETURN":
+            return self.return_stmt()
         if self.current.type == "LBRACE":
             return self.block()
         if self.current.type == "INT":
@@ -360,8 +681,14 @@ class Parser:
             return self.if_stmt()
         if self.current.type == "WHILE":
             return self.while_stmt()
+        if self.current.type == "FOR":
+            return self.for_stmt()
+        if self.current.type == "DO":
+            return self.do_while_stmt()
         if self.current.type == "PRINT":
             return self.print_stmt()
+        if self.current.type == "SCAN":
+            return self.scan_stmt()
         if self.current.type == "IDENT" and self._peek().type == "ASSIGN":
             name = self.advance().value
             self.expect("ASSIGN")
@@ -369,25 +696,48 @@ class Parser:
             self.expect("SEMI")
             return Assign(name, expr)
 
+        inc_dec = self._parse_inc_dec()
+        if inc_dec is not None:
+            self.expect("SEMI")
+            return inc_dec
+
         t = self.current
         raise SyntaxError(
             f"Invalid statement starting with {t.type} at line {t.line}, column {t.column}"
         )
 
-    def var_decl(self) -> VarDecl:
+    def return_stmt(self) -> Optional[ASTNode]:
+        """Skip return expr; (handled when compiling full C programs)."""
+        self.expect("RETURN")
+        if self.current.type != "SEMI":
+            self.expr()
+        self.expect("SEMI")
+        return None
+
+    def var_decl(self) -> ASTNode:
         self.expect("INT")
+        decls = [self._parse_var_decl_item()]
+        while self.match("COMMA"):
+            decls.append(self._parse_var_decl_item())
+        self.expect("SEMI")
+        if len(decls) == 1:
+            return decls[0]
+        return VarDeclGroup(decls)
+
+    def _parse_var_decl_item(self) -> VarDecl:
         name = self.expect("IDENT").value
         init: Optional[ASTNode] = None
         if self.match("ASSIGN"):
             init = self.expr()
-        self.expect("SEMI")
         return VarDecl(name, init)
 
     def block(self) -> Block:
         self.expect("LBRACE")
         statements: List[ASTNode] = []
         while self.current.type not in ("RBRACE", "EOF"):
-            statements.append(self.statement())
+            stmt = self.statement()
+            if stmt is not None:
+                statements.append(stmt)
         self.expect("RBRACE")
         return Block(statements)
 
@@ -410,13 +760,93 @@ class Parser:
         body = self.statement()
         return WhileStmt(condition, body)
 
+    def for_stmt(self) -> ForStmt:
+        self.expect("FOR")
+        self.expect("LPAREN")
+
+        init: Optional[ASTNode] = None
+        if self.current.type == "INT":
+            self.expect("INT")
+            name = self.expect("IDENT").value
+            init_val: Optional[ASTNode] = None
+            if self.match("ASSIGN"):
+                init_val = self.expr()
+            self.expect("SEMI")
+            init = VarDecl(name, init_val)
+        elif self.current.type == "IDENT" and self._peek().type == "ASSIGN":
+            name = self.advance().value
+            self.expect("ASSIGN")
+            init = Assign(name, self.expr())
+            self.expect("SEMI")
+        else:
+            self.expect("SEMI")
+
+        condition: Optional[ASTNode] = None
+        if self.current.type != "SEMI":
+            condition = self.condition()
+        self.expect("SEMI")
+
+        increment: Optional[ASTNode] = None
+        if self.current.type != "RPAREN":
+            increment = self._for_increment()
+        self.expect("RPAREN")
+
+        body = self.statement()
+        return ForStmt(body, init, condition, increment)
+
+    def _for_increment(self) -> ASTNode:
+        inc_dec = self._parse_inc_dec()
+        if inc_dec is not None:
+            return inc_dec
+        if self.current.type == "IDENT" and self._peek().type == "ASSIGN":
+            name = self.advance().value
+            self.expect("ASSIGN")
+            return Assign(name, self.expr())
+        return self.expr()
+
+    def _parse_inc_dec(self) -> Optional[IncDec]:
+        if self.current.type in ("INC", "DEC") and self._peek().type == "IDENT":
+            op = self.advance().type
+            name = self.expect("IDENT").value
+            return IncDec(name, op, prefix=True)
+        if self.current.type == "IDENT" and self._peek().type in ("INC", "DEC"):
+            name = self.advance().value
+            op = self.advance().type
+            return IncDec(name, op, prefix=False)
+        return None
+
+    def do_while_stmt(self) -> DoWhileStmt:
+        self.expect("DO")
+        body = self.statement()
+        self.expect("WHILE")
+        self.expect("LPAREN")
+        condition = self.condition()
+        self.expect("RPAREN")
+        self.expect("SEMI")
+        return DoWhileStmt(body, condition)
+
     def print_stmt(self) -> PrintStmt:
         self.expect("PRINT")
         self.expect("LPAREN")
         expr = self.expr()
+        extra_args: List[ASTNode] = []
+        while self.match("COMMA"):
+            extra_args.append(self.expr())
         self.expect("RPAREN")
         self.expect("SEMI")
-        return PrintStmt(expr)
+        return PrintStmt(expr, extra_args)
+
+    def scan_stmt(self) -> ScanStmt:
+        self.expect("SCAN")
+        self.expect("LPAREN")
+        format_expr = self.expr()
+        variables: List[str] = []
+        while self.match("COMMA"):
+            self.expect("AMP")
+            variables.append(self.expect("IDENT").value)
+        self.expect("RPAREN")
+        self.expect("SEMI")
+        return ScanStmt(format_expr, variables)
 
     def condition(self) -> ASTNode:
         left = self.expr()
@@ -448,7 +878,22 @@ class Parser:
             return Number(value)
         if tok.type == "IDENT":
             self.advance()
+            if self.current.type in ("INC", "DEC"):
+                op = self.advance().type
+                return IncDec(tok.value, op, prefix=False)
             return Variable(tok.value)
+        if tok.type in ("INC", "DEC"):
+            op = self.advance().type
+            if self.current.type != "IDENT":
+                raise SyntaxError(
+                    f"Expected identifier after {op}, got {self.current.type} "
+                    f"at line {self.current.line}, column {self.current.column}"
+                )
+            name = self.advance().value
+            return IncDec(name, op, prefix=True)
+        if tok.type == "STRING":
+            self.advance()
+            return StringLiteral(decode_c_string(tok.value))
         if tok.type == "LPAREN":
             self.advance()
             node = self.expr()
@@ -490,6 +935,8 @@ class Instruction:
             return f"ifz {self.arg1} goto {self.target}"
         if self.op == "PRINT":
             return f"printf {self.arg1}"
+        if self.op == "SCAN":
+            return f"scanf {self.arg1} -> {self.arg2}"
         return f"{self.target}: {self.op} {self.arg1 or ''} {self.arg2 or ''}".strip()
 
 
@@ -535,6 +982,11 @@ class CodeGenerator:
         if isinstance(node, Variable):
             return node.name
 
+        if isinstance(node, StringLiteral):
+            temp = self.new_temp()
+            self.instructions.append(Instruction(temp, "CONST", repr(node.value)))
+            return temp
+
         if isinstance(node, BinaryOp):
             left = self._gen_node(node.left)
             right = self._gen_node(node.right)
@@ -556,9 +1008,26 @@ class CodeGenerator:
             self.instructions.append(Instruction(node.name, "MOV", src))
             return node.name
 
+        if isinstance(node, IncDec):
+            return self._gen_inc_dec(node)
+
         if isinstance(node, PrintStmt):
-            value = self._gen_node(node.expr)
-            self.instructions.append(Instruction("", "PRINT", value))
+            if isinstance(node.expr, StringLiteral):
+                self.instructions.append(Instruction("", "PRINT", repr(node.expr.value)))
+            else:
+                value = self._gen_node(node.expr)
+                self.instructions.append(Instruction("", "PRINT", value))
+            for arg in node.extra_args:
+                self.instructions.append(Instruction("", "PRINT", self._gen_node(arg)))
+            return None
+
+        if isinstance(node, ScanStmt):
+            if isinstance(node.format_expr, StringLiteral):
+                fmt = repr(node.format_expr.value)
+            else:
+                fmt = self._gen_node(node.format_expr)
+            for var in node.variables:
+                self.instructions.append(Instruction("", "SCAN", fmt, var))
             return None
 
         if isinstance(node, Block):
@@ -592,6 +1061,33 @@ class CodeGenerator:
             self.instructions.append(Instruction(end_label, "LABEL"))
             return None
 
+        if isinstance(node, ForStmt):
+            if node.init is not None:
+                self._gen_node(node.init)
+            start_label = self.new_label()
+            end_label = self.new_label()
+            self.instructions.append(Instruction(start_label, "LABEL"))
+            if node.condition is not None:
+                cond = self._gen_node(node.condition)
+                self.instructions.append(Instruction(end_label, "JZ", cond))
+            self._gen_node(node.body)
+            if node.increment is not None:
+                self._gen_node(node.increment)
+            self.instructions.append(Instruction(start_label, "JMP"))
+            self.instructions.append(Instruction(end_label, "LABEL"))
+            return None
+
+        if isinstance(node, DoWhileStmt):
+            start_label = self.new_label()
+            end_label = self.new_label()
+            self.instructions.append(Instruction(start_label, "LABEL"))
+            self._gen_node(node.body)
+            cond = self._gen_node(node.condition)
+            self.instructions.append(Instruction(end_label, "JZ", cond))
+            self.instructions.append(Instruction(start_label, "JMP"))
+            self.instructions.append(Instruction(end_label, "LABEL"))
+            return None
+
         if isinstance(node, Program):
             return None
 
@@ -601,7 +1097,27 @@ class CodeGenerator:
                 self.instructions.append(Instruction(node.name, "MOV", src))
             return node.name
 
+        if isinstance(node, VarDeclGroup):
+            for decl in node.declarations:
+                self._gen_node(decl)
+            return None
+
         raise TypeError(f"Unsupported AST node: {type(node).__name__}")
+
+    def _gen_inc_dec(self, node: IncDec) -> str:
+        old_val = node.name
+        if not node.prefix:
+            old_val = self.new_temp()
+            self.instructions.append(Instruction(old_val, "MOV", node.name))
+        one = self.new_temp()
+        self.instructions.append(Instruction(one, "CONST", "1"))
+        updated = self.new_temp()
+        if node.op == "INC":
+            self.instructions.append(Instruction(updated, "+", node.name, one))
+        else:
+            self.instructions.append(Instruction(updated, "-", node.name, one))
+        self.instructions.append(Instruction(node.name, "MOV", updated))
+        return updated if node.prefix else old_val
 
 
 # ========== SEMANTIC ANALYSIS PHASE ==========
@@ -652,6 +1168,11 @@ class SemanticAnalyzer:
                 self._check_expr(node.init)
             return
 
+        if isinstance(node, VarDeclGroup):
+            for decl in node.declarations:
+                self._check_stmt(decl)
+            return
+
         if isinstance(node, Assign):
             if node.name not in self.symbols:
                 self._error(f"Assignment to undeclared variable '{node.name}'.")
@@ -660,6 +1181,15 @@ class SemanticAnalyzer:
 
         if isinstance(node, PrintStmt):
             self._check_expr(node.expr)
+            for arg in node.extra_args:
+                self._check_expr(arg)
+            return
+
+        if isinstance(node, ScanStmt):
+            self._check_expr(node.format_expr)
+            for var in node.variables:
+                if var not in self.symbols:
+                    self._error(f"scanf on undeclared variable '{var}'.")
             return
 
         if isinstance(node, IfStmt):
@@ -674,6 +1204,33 @@ class SemanticAnalyzer:
             self._check_stmt(node.body)
             return
 
+        if isinstance(node, ForStmt):
+            if node.init is not None:
+                self._check_stmt(node.init)
+            if node.condition is not None:
+                self._check_expr(node.condition)
+            if node.increment is not None:
+                if isinstance(node.increment, Assign):
+                    if node.increment.name not in self.symbols:
+                        self._error(
+                            f"Assignment to undeclared variable '{node.increment.name}'."
+                        )
+                    self._check_expr(node.increment.expr)
+                elif isinstance(node.increment, IncDec):
+                    if node.increment.name not in self.symbols:
+                        self._error(
+                            f"Use of undeclared variable '{node.increment.name}'."
+                        )
+                else:
+                    self._check_expr(node.increment)
+            self._check_stmt(node.body)
+            return
+
+        if isinstance(node, DoWhileStmt):
+            self._check_stmt(node.body)
+            self._check_expr(node.condition)
+            return
+
         if isinstance(node, Block):
             for stmt in node.statements:
                 self._check_stmt(stmt)
@@ -682,7 +1239,13 @@ class SemanticAnalyzer:
     def _check_expr(self, node: ASTNode) -> None:
         if isinstance(node, Number):
             return
+        if isinstance(node, StringLiteral):
+            return
         if isinstance(node, Variable):
+            if node.name not in self.symbols:
+                self._error(f"Use of undeclared variable '{node.name}'.")
+            return
+        if isinstance(node, IncDec):
             if node.name not in self.symbols:
                 self._error(f"Use of undeclared variable '{node.name}'.")
             return
@@ -826,6 +1389,11 @@ def _expr_summary(node: ASTNode) -> str:
         return str(node.value)
     if isinstance(node, Variable):
         return node.name
+    if isinstance(node, IncDec):
+        sym = "++" if node.op == "INC" else "--"
+        return f"{sym}{node.name}" if node.prefix else f"{node.name}{sym}"
+    if isinstance(node, StringLiteral):
+        return repr(node.value)
     if isinstance(node, BinaryOp):
         return f"({_expr_summary(node.left)} {_OP_SYMBOL.get(node.op, node.op)} {_expr_summary(node.right)})"
     if isinstance(node, CompareOp):
@@ -833,15 +1401,30 @@ def _expr_summary(node: ASTNode) -> str:
     return type(node).__name__
 
 
+def _var_decl_item_summary(d: VarDecl) -> str:
+    if d.init is None:
+        return d.name
+    return f"{d.name} = {_expr_summary(d.init)}"
+
+
 def _stmt_plain(n: ASTNode, index: int) -> str:
     if isinstance(n, VarDecl):
-        if n.init is None:
-            return f"{index}. declare int {n.name};"
-        return f"{index}. declare int {n.name} = {_expr_summary(n.init)};"
+        return f"{index}. declare int {_var_decl_item_summary(n)};"
+    if isinstance(n, VarDeclGroup):
+        items = ", ".join(_var_decl_item_summary(d) for d in n.declarations)
+        return f"{index}. declare int {items};"
     if isinstance(n, Assign):
         return f"{index}. {n.name} = {_expr_summary(n.expr)};"
+    if isinstance(n, IncDec):
+        sym = "++" if n.op == "INC" else "--"
+        text = f"{sym}{n.name}" if n.prefix else f"{n.name}{sym}"
+        return f"{index}. {text};"
     if isinstance(n, PrintStmt):
-        return f"{index}. printf({_expr_summary(n.expr)});"
+        args = [_expr_summary(n.expr)] + [_expr_summary(a) for a in n.extra_args]
+        return f"{index}. printf({', '.join(args)});"
+    if isinstance(n, ScanStmt):
+        vars_text = ", ".join(f"&{v}" for v in n.variables)
+        return f"{index}. scanf({_expr_summary(n.format_expr)}, {vars_text});"
     if isinstance(n, IfStmt):
         text = f"{index}. if ({_expr_summary(n.condition)}) {{ ... }}"
         if n.else_branch is not None:
@@ -849,6 +1432,11 @@ def _stmt_plain(n: ASTNode, index: int) -> str:
         return text
     if isinstance(n, WhileStmt):
         return f"{index}. while ({_expr_summary(n.condition)}) {{ ... }}"
+    if isinstance(n, ForStmt):
+        cond = _expr_summary(n.condition) if n.condition else ""
+        return f"{index}. for (...; {cond}; ...) {{ ... }}"
+    if isinstance(n, DoWhileStmt):
+        return f"{index}. do {{ ... }} while ({_expr_summary(n.condition)});"
     if isinstance(n, Block):
         return f"{index}. {{ {len(n.statements)} statements }}"
     return f"{index}. {type(n).__name__}"
@@ -881,6 +1469,8 @@ def _instr_plain(instr: Instruction) -> str:
         return f"if {instr.arg1} is false, go to {instr.target}"
     if instr.op == "PRINT":
         return f"printf {instr.arg1}"
+    if instr.op == "SCAN":
+        return f"scanf {instr.arg1} into {instr.arg2}"
     return str(instr)
 
 
@@ -934,11 +1524,13 @@ class CompileResult:
     semantic: SemanticResult
     raw_instructions: List[Instruction]
     optimized_instructions: List[Instruction]
+    prepare: Optional[PrepareResult] = None
 
 
 def compile_program(source: str, *, stop_on_semantic_error: bool = True) -> CompileResult:
     """Run all compiler phases on full source code."""
     tokens = lex(source)
+    prepare = get_last_prepare()
     ast = Parser(tokens).parse()
     semantic = SemanticAnalyzer().analyze(ast)
     if stop_on_semantic_error and not semantic.ok:
@@ -947,7 +1539,9 @@ def compile_program(source: str, *, stop_on_semantic_error: bool = True) -> Comp
     codegen = CodeGenerator()
     raw_instructions, _ = codegen.generate(ast)
     optimized_instructions = optimize_instructions(raw_instructions)
-    return CompileResult(tokens, ast, semantic, raw_instructions, optimized_instructions)
+    return CompileResult(
+        tokens, ast, semantic, raw_instructions, optimized_instructions, prepare
+    )
 
 
 def compile_source(source: str) -> Tuple[List[Instruction], List[Instruction]]:

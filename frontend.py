@@ -7,11 +7,13 @@ from phase1 import (
     CodeGenerator,
     SemanticAnalyzer,
     optimize_instructions,
+    get_last_prepare,
     format_tokens,
     format_ast,
     format_semantic,
     format_codegen,
     format_optimized,
+    format_prepare_notes,
 )
 
 # Layout / theme
@@ -54,7 +56,7 @@ class CompilerFrontend(tk.Tk):
 
         subtitle = tk.Label(
             header,
-            text="Paste code -> see 5 simple phases: tokens, AST, semantic, code, optimized",
+            text="Paste C code -> Tokens, AST, Semantic, TAC(Three-Address Code), Optimized",
             font=("Segoe UI", 12),
             fg=FG_MUTED,
             bg=BG_APP,
@@ -104,11 +106,17 @@ class CompilerFrontend(tk.Tk):
         )
         self.input_entry.pack(fill="x", padx=28, pady=(0, 10))
         self.input_entry.insert(
-            "1.0",
-            "int x = 5;\nint y = 2;\nint z = x + y * 3;\nprintf(z);\n"
-            "if (z > 10) {\n  printf(z);\n} else {\n  z = z + 1;\n  printf(z);\n}\n"
-            "while (y < 5) {\n  y = y + 1;\n  printf(y);\n}\n",
-        )
+    "1.0",
+    "#include <stdio.h>\n\n"
+    "int main() {\n"
+    "    int i;\n\n"
+    "    printf(\"Numbers from 1 to 10:\\n\");\n"
+    "    for (i = 1; i <= 10; i++) {\n"
+    "        printf(\"%d\\n\", i);\n"
+    "    }\n\n"
+    "    return 0;\n"
+    "}\n",
+)
 
         phases_frame = tk.Frame(self, bg=BG_APP)
         phases_frame.pack(fill="both", expand=True, padx=16, pady=(8, 12))
@@ -212,7 +220,9 @@ class CompilerFrontend(tk.Tk):
             self.status_label.configure(text="Running pipeline...")
 
             tokens = lex(source)
-            tokens_text = format_tokens(tokens)
+            prepared = get_last_prepare()
+            prep_text = format_prepare_notes(prepared) if prepared else ""
+            tokens_text = (prep_text + format_tokens(tokens)) if prep_text else format_tokens(tokens)
 
             parser = Parser(tokens)
             ast = parser.parse()
